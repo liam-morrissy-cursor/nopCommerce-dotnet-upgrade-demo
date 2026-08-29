@@ -1,0 +1,97 @@
+name: Reset upgrade demo
+
+# Mirrors upstream nopCommerce at a legacy release tag into this repo and
+# force-resets the demo branches. Running it again at any time resets the demo.
+#
+# Trigger it one of three ways:
+#   1. ./demo-tools/reset-demo.sh          (wraps `gh workflow run`)
+#   2. Actions tab -> "Reset upgrade demo" -> Run workflow
+#   3. Edit demo-tools/reset-trigger on main (no CLI required)
+
+on:
+  workflow_dispatch:
+    inputs:
+      baseline_tag:
+        description: "Upstream nopCommerce tag to mirror as the legacy baseline"
+        required: false
+        default: release-4.50.4
+      prune_extra_branches:
+        description: "Delete all branches except main/demo/net6-baseline (cleans up branches left over from a previous demo)"
+        required: false
+        default: "false"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/reset-demo.yml"
+      - "demo-tools/reset-trigger"
+  # Temporary bootstrap trigger: no-ops once the demo branches exist.
+  schedule:
+    - cron: "*/10 * * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: reset-demo
+  cancel-in-progress: false
+
+jobs:
+  reset:
+    runs-on: ubuntu-latest
+    env:
+      BASELINE_TAG: ${{ github.event.inputs.baseline_tag || 'release-4.50.4' }}
+      PRUNE: ${{ github.event.inputs.prune_extra_branches || 'false' }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: Heartbeat (proves the workflow triggered)
+        run: |
+          set -euo pipefail
+          git init -b main hb && cd hb
+          git config user.name "demo-bot"
+          git config user.email "demo-bot@users.noreply.github.com"
+          git commit --allow-empty -m "workflow heartbeat: run ${GITHUB_RUN_ID}"
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            HEAD:refs/heads/workflow-heartbeat
+
+      - name: Mirror upstream tag into baseline and demo branches
+        run: |
+          set -euo pipefail
+
+          REPO_URL="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          if [ "${GITHUB_EVENT_NAME}" = "schedule" ] \
+             && git ls-remote --exit-code --heads "$REPO_URL" demo >/dev/null 2>&1; then
+            echo "Demo branch already exists; scheduled bootstrap not needed."
+            exit 0
+          fi
+
+          echo "Cloning upstream nopCommerce at tag ${BASELINE_TAG}..."
+          git clone --branch "${BASELINE_TAG}" --single-branch \
+            https://github.com/nopCommerce/nopCommerce.git upstream
+          cd upstream
+
+          TFM=$(grep -oPm1 '(?<=<TargetFramework>)[^<]+' src/Libraries/Nop.Core/Nop.Core.csproj)
+          echo "Baseline target framework: ${TFM}"
+
+          git remote add demo "$REPO_URL"
+          git push --force demo "HEAD:refs/heads/net6-baseline"
+          git push --force demo "HEAD:refs/heads/demo"
+
+          if [ "${PRUNE}" = "true" ]; then
+            echo "Pruning extra branches..."
+            git ls-remote --heads demo | awk '{print $2}' | while read -r ref; do
+              name="${ref#refs/heads/}"
+              case "$name" in main|demo|net6-baseline) continue ;; esac
+              echo "Deleting branch: $name"
+              git push demo --delete "$name"
+            done
+          fi
+
+          {
+            echo "## Demo reset complete"
+            echo "- Baseline tag: \`${BASELINE_TAG}\` ($(git rev-parse --short HEAD))"
+            echo "- Target framework: \`${TFM}\`"
+            echo "- Branches force-updated: \`net6-baseline\`, \`demo\`"
+            echo "- Extra branches pruned: \`${PRUNE}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

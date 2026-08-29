@@ -1,0 +1,5 @@
+Edit this file (any change) on the main branch to trigger a demo reset
+without needing the GitHub CLI. The "Reset upgrade demo" workflow runs on
+every push to main that touches this file.
+
+Last reset trigger: initial setup
